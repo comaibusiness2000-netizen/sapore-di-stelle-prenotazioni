@@ -995,6 +995,9 @@ textarea:focus {
 
     <script>
 const defaultPortions = 15;
+const supabaseUrl = "https://vxxnquokcsyvfcdbbxwq.supabase.co";
+const supabaseAnonKey =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ4eG5xdW9rY3N5dmZjZGJieHdxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEwMTgwNTEsImV4cCI6MjA5NjU5NDA1MX0.LPXfG-vh4V84QOpdf5hvkC1C4z18bKJKYWq5_3f-jMQ";
 
 const defaultMenu = {
   date: getLocalDate(),
@@ -1080,12 +1083,142 @@ function saveState() {
   localStorage.setItem(storageKeys.bookings, JSON.stringify(bookings));
 }
 
+async function supabaseRequest(path, options = {}) {
+  const response = await fetch(`${supabaseUrl}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      apikey: supabaseAnonKey,
+      Authorization: `Bearer ${supabaseAnonKey}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+      ...(options.headers || {}),
+    },
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Errore Supabase ${response.status}`);
+  }
+
+  if (response.status === 204) {
+    return [];
+  }
+
+  return response.json();
+}
+
+function menuFromRows(rows) {
+  const sortedRows = [...rows].sort((first, second) => first.position - second.position);
+
+  return {
+    date: rows[0]?.menu_date || getLocalDate(),
+    firstCourses: sortedRows
+      .filter((row) => row.category === "Primi")
+      .map((row) => ({ id: row.id, name: row.name, portions: row.portions })),
+    secondCourses: sortedRows
+      .filter((row) => row.category === "Secondi")
+      .map((row) => ({ id: row.id, name: row.name, portions: row.portions })),
+    dailySalad:
+      sortedRows
+        .filter((row) => row.category === "Insalatona del giorno")
+        .map((row) => ({ id: row.id, name: row.name, portions: row.portions }))[0] || defaultMenu.dailySalad,
+  };
+}
+
+function bookingsFromRows(rows) {
+  return rows.map((row) => ({
+    id: row.id,
+    createdAt: row.created_at,
+    manual: row.manual,
+    name: row.customer_name,
+    time: String(row.arrival_time || "").slice(0, 5),
+    people: row.people,
+    orders: (row.order_items || []).map((item) => ({
+      key: item.menu_item_id,
+      dish: item.menu_items?.name || "",
+      category: item.menu_items?.category || "",
+      note: item.note || "",
+    })),
+  }));
+}
+
+async function loadRemoteData() {
+  const today = getLocalDate();
+  const [menuRows, orderRows] = await Promise.all([
+    supabaseRequest(`menu_items?menu_date=eq.${today}&select=*&order=position.asc`),
+    supabaseRequest("orders?select=*,order_items(*,menu_items(*))&order=created_at.asc"),
+  ]);
+
+  menu = menuRows.length ? menuFromRows(menuRows) : defaultMenu;
+  bookings = bookingsFromRows(orderRows);
+  saveState();
+}
+
+async function publishRemoteMenu(nextMenu) {
+  const rows = [
+    ...nextMenu.firstCourses.map((item, index) => ({ ...item, category: "Primi", position: index })),
+    ...nextMenu.secondCourses.map((item, index) => ({ ...item, category: "Secondi", position: index })),
+    { ...nextMenu.dailySalad, category: "Insalatona del giorno", position: 0 },
+  ].map((item) => ({
+    menu_date: nextMenu.date,
+    category: item.category,
+    name: item.name,
+    portions: item.portions,
+    position: item.position,
+  }));
+
+  await supabaseRequest("orders?id=not.is.null", { method: "DELETE" });
+  await supabaseRequest(`menu_items?menu_date=eq.${nextMenu.date}`, { method: "DELETE" });
+
+  if (rows.length) {
+    await supabaseRequest("menu_items", {
+      method: "POST",
+      body: JSON.stringify(rows),
+    });
+  }
+
+  await loadRemoteData();
+}
+
+async function insertRemoteOrder(order) {
+  const [createdOrder] = await supabaseRequest("orders", {
+    method: "POST",
+    body: JSON.stringify({
+      customer_name: order.name,
+      arrival_time: order.time,
+      people: order.people,
+      manual: order.manual || false,
+    }),
+  });
+
+  const orderItems = order.orders.map((item) => ({
+    order_id: createdOrder.id,
+    menu_item_id: item.key,
+    note: item.note || "",
+  }));
+
+  if (orderItems.length) {
+    await supabaseRequest("order_items", {
+      method: "POST",
+      body: JSON.stringify(orderItems),
+    });
+  }
+
+  await loadRemoteData();
+}
+
+async function clearRemoteOrders() {
+  await supabaseRequest("orders?id=not.is.null", { method: "DELETE" });
+  await loadRemoteData();
+}
+
 function normalizeDishItem(item) {
   if (typeof item === "string") {
     return { name: item, portions: defaultPortions };
   }
 
   return {
+    id: item?.id || null,
     name: item?.name || item?.dish || "",
     portions: Math.max(1, Number(item?.portions) || defaultPortions),
   };
@@ -1173,7 +1306,7 @@ function getMenuGroups() {
 function getAllDishes() {
   return getMenuGroups().flatMap((group) =>
     group.items.map((item) => ({
-      key: createDishKey(group.label, item.name),
+      key: item.id || createDishKey(group.label, item.name),
       dish: item.name,
       category: group.label,
       portions: item.portions,
@@ -1260,7 +1393,7 @@ function syncMenuForm() {
                 ${group.items
                   .map((item) => {
                     const dish = {
-                      key: createDishKey(group.label, item.name),
+                      key: item.id || createDishKey(group.label, item.name),
                       dish: item.name,
                       category: group.label,
                       portions: item.portions,
@@ -1291,7 +1424,7 @@ function buildGuestOrderRows() {
     .map((group) => ({
       ...group,
       dishes: group.items.map((item) => ({
-        key: createDishKey(group.label, item.name),
+        key: item.id || createDishKey(group.label, item.name),
         dish: item.name,
         category: group.label,
         portions: item.portions,
@@ -1344,7 +1477,7 @@ function buildDishOptions({ includeSoldOut = false } = {}) {
     .map((group) => ({
       ...group,
       dishes: group.items.map((item) => ({
-        key: createDishKey(group.label, item.name),
+        key: item.id || createDishKey(group.label, item.name),
         dish: item.name,
         category: group.label,
         portions: item.portions,
@@ -1528,10 +1661,10 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-elements.menuForm.addEventListener("submit", (event) => {
+elements.menuForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
-  menu = {
+  const nextMenu = {
     date: elements.menuDate.value,
     firstCourses: parseDishLines(elements.firstCourses.value),
     secondCourses: parseDishLines(elements.secondCourses.value),
@@ -1541,19 +1674,29 @@ elements.menuForm.addEventListener("submit", (event) => {
     },
   };
 
-  bookings = [];
-  saveState();
-  syncMenuForm();
-  buildGuestOrderRows();
-  syncManualOrderForm();
-  renderSummary();
+  try {
+    await publishRemoteMenu(nextMenu);
+    syncMenuForm();
+    buildGuestOrderRows();
+    syncManualOrderForm();
+    renderSummary();
+  } catch (error) {
+    alert(`Non sono riuscito a pubblicare il menu: ${error.message}`);
+  }
 });
 
-elements.bookingForm.addEventListener("submit", (event) => {
+elements.bookingForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   if (!elements.bookingForm.checkValidity()) {
     elements.bookingForm.reportValidity();
+    return;
+  }
+
+  try {
+    await loadRemoteData();
+  } catch (error) {
+    showBookingError(`Non riesco a controllare le disponibilità aggiornate: ${error.message}`);
     return;
   }
 
@@ -1565,172 +1708,4 @@ elements.bookingForm.addEventListener("submit", (event) => {
 
   const fullName = elements.customerName.value.trim();
 
-  if (fullName.split(/\s+/).length < 2) {
-    elements.customerName.setCustomValidity("Inserisci nome e cognome.");
-    elements.customerName.reportValidity();
-    return;
-  }
-
-  elements.customerName.setCustomValidity("");
-
-  const alreadyBooked = bookings.some(
-    (booking) => !booking.manual && normalizeCustomerName(booking.name) === normalizeCustomerName(fullName),
-  );
-
-  if (alreadyBooked) {
-    showDuplicateBooking(fullName);
-    return;
-  }
-
-  const dishMap = Object.fromEntries(allDishes.map((item) => [item.key, item]));
-  const counts = getOrderedCounts();
-  const orderRows = [...elements.guestOrders.querySelectorAll(".guest-row")];
-  const requestedCounts = {};
-  const orders = orderRows.map((row) => {
-    const key = row.querySelector("select").value;
-    const dish = dishMap[key];
-    requestedCounts[key] = (requestedCounts[key] || 0) + 1;
-
-    return {
-      key,
-      dish: dish?.dish || "",
-      category: dish?.category || "",
-      note: row.querySelector('input[type="text"]').value.trim(),
-    };
-  });
-
-  const unavailableDish = Object.entries(requestedCounts).find(([key, requested]) => {
-    const dish = dishMap[key];
-    return !dish || requested > getRemaining(dish, counts);
-  });
-
-  if (unavailableDish) {
-    const dish = dishMap[unavailableDish[0]];
-    showBookingError(`${dish?.dish || "Un piatto scelto"} non ha abbastanza porzioni disponibili.`);
-    buildGuestOrderRows();
-    syncMenuForm();
-    return;
-  }
-
-  bookings.unshift({
-    id: createBookingId(),
-    createdAt: new Date().toISOString(),
-    name: fullName,
-    time: elements.bookingTime.value,
-    people: Number(elements.partySize.value),
-    orders,
-  });
-
-  saveState();
-  elements.bookingForm.reset();
-  elements.partySize.value = 2;
-  syncMenuForm();
-  buildGuestOrderRows();
-  syncManualOrderForm();
-  renderSummary();
-  showBookingSuccess(fullName);
-});
-
-elements.manualOrderForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-
-  if (!elements.manualOrderForm.checkValidity()) {
-    elements.manualOrderForm.reportValidity();
-    return;
-  }
-
-  const dishMap = Object.fromEntries(getAllDishes().map((item) => [item.key, item]));
-  const key = elements.manualDish.value;
-  const dish = dishMap[key];
-  const quantity = Math.max(1, Number(elements.manualQuantity.value) || 1);
-
-  if (!dish) {
-    showMessage(elements.manualSuccess, "Seleziona un piatto disponibile.", true);
-    return;
-  }
-
-  if (quantity > getRemaining(dish)) {
-    showMessage(elements.manualSuccess, `${dish.dish} non ha abbastanza porzioni disponibili.`, true);
-    return;
-  }
-
-  const note = elements.manualNote.value.trim();
-  const orders = Array.from({ length: quantity }, () => ({
-    key,
-    dish: dish.dish,
-    category: dish.category,
-    note,
-  }));
-
-  bookings.unshift({
-    id: createBookingId(),
-    createdAt: new Date().toISOString(),
-    manual: true,
-    name: elements.manualCustomer.value.trim() || "Ordine al banco",
-    time: elements.manualTime.value || getNearestQuarterHour(),
-    people: 0,
-    orders,
-  });
-
-  saveState();
-  elements.manualCustomer.value = "";
-  elements.manualQuantity.value = 1;
-  elements.manualNote.value = "";
-  syncMenuForm();
-  buildGuestOrderRows();
-  syncManualOrderForm();
-  renderSummary();
-  showMessage(elements.manualSuccess, "Ordine manuale aggiunto al riepilogo.");
-});
-
-elements.bookingForm.addEventListener("input", (event) => {
-  if (!event.target.closest("#bookingSuccess")) {
-    clearBookingSuccess();
-  }
-});
-
-elements.manualOrderForm.addEventListener("input", () => {
-  clearManualSuccess();
-});
-
-elements.sortButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    summarySort = button.dataset.sort;
-    elements.sortButtons.forEach((item) => item.classList.toggle("is-active", item === button));
-    renderSummary();
-  });
-});
-
-elements.partySize.addEventListener("input", buildGuestOrderRows);
-
-elements.customerName.addEventListener("input", () => {
-  elements.customerName.setCustomValidity("");
-});
-
-elements.clearBookings.addEventListener("click", () => {
-  bookings = [];
-  saveState();
-  syncMenuForm();
-  buildGuestOrderRows();
-  syncManualOrderForm();
-  renderSummary();
-});
-
-elements.resetDemo.addEventListener("click", () => {
-  menu = defaultMenu;
-  bookings = [];
-  saveState();
-  syncMenuForm();
-  buildGuestOrderRows();
-  syncManualOrderForm();
-  renderSummary();
-});
-
-syncMenuForm();
-buildGuestOrderRows();
-syncManualOrderForm();
-renderSummary();
-
-</script>
-  </body>
-</html>
+  if (fullName.split(/\s+/).length < 
