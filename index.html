@@ -696,15 +696,21 @@ textarea:focus {
 
 @media (max-width: 620px) {
   .app-shell {
-    padding: 14px;
+    padding: 12px;
   }
 
   .topbar,
   .section-heading,
   .block-title,
   .summary-toolbar {
-    align-items: stretch;
+    align-items: center;
     flex-direction: column;
+    text-align: center;
+  }
+
+  .topbar {
+    gap: 14px;
+    padding: 18px 16px;
   }
 
   .summary-toolbar .subheading {
@@ -712,23 +718,70 @@ textarea:focus {
   }
 
   .brand-lockup {
-    align-items: flex-start;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    text-align: center;
   }
 
   .brand-lockup img {
-    width: 92px;
+    width: 116px;
   }
 
   h1 {
-    font-size: 2.05rem;
+    max-width: 310px;
+    font-size: 2.15rem;
+    line-height: 1;
   }
 
   .today {
+    width: 100%;
     text-align: left;
+  }
+
+  .panel {
+    padding: 18px;
   }
 
   .inline-fields {
     grid-template-columns: 1fr;
+  }
+
+  .status-pill,
+  .sort-toggle {
+    width: 100%;
+  }
+
+  .menu-dish,
+  .total-row {
+    grid-template-columns: 1fr;
+    justify-items: start;
+  }
+
+  .menu-dish small {
+    white-space: normal;
+  }
+
+  .block-title small {
+    align-self: center;
+  }
+
+  .booking-confirmation {
+    padding: 16px;
+  }
+
+  .booking-confirmation::before {
+    width: calc(100% - 24px);
+    min-height: min(430px, calc(100vh - 32px));
+  }
+
+  .booking-confirmation h2 {
+    max-width: 320px;
+    font-size: 2.35rem;
+  }
+
+  .booking-confirmation p {
+    max-width: 300px;
   }
 }
 
